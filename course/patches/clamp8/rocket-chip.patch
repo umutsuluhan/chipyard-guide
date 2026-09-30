@@ -1,0 +1,93 @@
+diff --git a/src/main/scala/rocket/ALU.scala b/src/main/scala/rocket/ALU.scala
+index ca8a110..e3c989a 100644
+--- a/src/main/scala/rocket/ALU.scala
++++ b/src/main/scala/rocket/ALU.scala
+@@ -32,6 +32,7 @@ object ALU {
+   def FN_ROL  = 17.U
+   def FN_ROR  = 18.U
+   def FN_BEXT = 19.U
++  def FN_CLAMP8 = 20.U
+ 
+   def FN_ANDN = 24.U
+   def FN_ORN  = 25.U
+@@ -160,6 +161,13 @@ class ALU(implicit p: Parameters) extends AbstractALU()(p) {
+   val rotout_l = Reverse(rotout_r)
+   val rotout = Mux(io.fn(0), rotout_r, rotout_l) | Mux(io.fn(0), shout_l, shout_r)
+ 
++  // CLAMP8: in1 is signed, so negative -> 0, anything above 255 -> 255
++  val useClamp8 = coreParams match {
++    case r: RocketCoreParams => r.useClamp8
++    case _ => false
++  }
++  val clamp8_out = Mux(io.in1(xLen-1), 0.U, Mux(io.in1(xLen-1,8).orR, 255.U, io.in1(7,0)))
++
+   val out = MuxLookup(io.fn, shift_logic_cond)(Seq(
+     FN_ADD -> io.adder_out,
+     FN_SUB -> io.adder_out
+@@ -171,6 +179,8 @@ class ALU(implicit p: Parameters) extends AbstractALU()(p) {
+     FN_MINU -> maxmin_out,
+     FN_ROL -> rotout,
+     FN_ROR -> rotout,
++  ) else Nil) ++ (if (useClamp8) Seq(
++    FN_CLAMP8 -> clamp8_out,
+   ) else Nil))
+ 
+ 
+diff --git a/src/main/scala/rocket/CustomInstructions.scala b/src/main/scala/rocket/CustomInstructions.scala
+index 0427fb4..e7dc0c0 100644
+--- a/src/main/scala/rocket/CustomInstructions.scala
++++ b/src/main/scala/rocket/CustomInstructions.scala
+@@ -34,6 +34,8 @@ object CustomInstructions {
+   def CUSTOM3_RD         = BitPat("b?????????????????100?????1111011")
+   def CUSTOM3_RD_RS1     = BitPat("b?????????????????110?????1111011")
+   def CUSTOM3_RD_RS1_RS2 = BitPat("b?????????????????111?????1111011")
++  // ECE 462/562 example: rd = clamp(rs1, 0, 255). custom-0, funct7=0, rs2=0, funct3=0
++  def CLAMP8             = BitPat("b000000000000?????000?????0001011")
+ }
+ 
+ object CustomCSRs {
+diff --git a/src/main/scala/rocket/IDecode.scala b/src/main/scala/rocket/IDecode.scala
+index e61d11d..e9f329e 100644
+--- a/src/main/scala/rocket/IDecode.scala
++++ b/src/main/scala/rocket/IDecode.scala
+@@ -145,6 +145,12 @@ class ConditionalZeroDecode(implicit val p: Parameters) extends DecodeConstants
+     CZERO_NEZ-> List(Y,N,N,N,N,N,Y,Y,A2_RS2, A1_RS1, IMM_X, DW_XPR,FN_CZNEZ, N,M_X,        N,N,N,N,N,N,Y,CSR.N,N,N,N,N))
+ }
+ 
++class Clamp8Decode(implicit val p: Parameters) extends DecodeConstants
++{
++  val table: Array[(BitPat, List[BitPat])] = Array(
++    CLAMP8-> List(Y,N,N,N,N,N,N,Y,A2_ZERO,A1_RS1, IMM_X, DW_XPR,FN_CLAMP8,N,M_X,       N,N,N,N,N,N,Y,CSR.N,N,N,N,N))
++}
++
+ class CFlushDecode(supportsFlushLine: Boolean)(implicit val p: Parameters) extends DecodeConstants
+ {
+   private def zapRs1(x: BitPat) = if (supportsFlushLine) x else BitPat(x.value.U)
+diff --git a/src/main/scala/rocket/RocketCore.scala b/src/main/scala/rocket/RocketCore.scala
+index 02f3147..dcc9e3d 100644
+--- a/src/main/scala/rocket/RocketCore.scala
++++ b/src/main/scala/rocket/RocketCore.scala
+@@ -27,6 +27,7 @@ case class RocketCoreParams(
+   useCompressed: Boolean = true,
+   useRVE: Boolean = false,
+   useConditionalZero: Boolean = false,
++  useClamp8: Boolean = false,
+   useZba: Boolean = false,
+   useZbb: Boolean = false,
+   useZbs: Boolean = false,
+@@ -235,6 +236,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
+     (usingDebug.option(new DebugDecode)) ++:
+     (usingNMI.option(new NMIDecode)) ++:
+     (usingConditionalZero.option(new ConditionalZeroDecode)) ++:
++    (rocketParams.useClamp8.option(new Clamp8Decode)) ++:
+     Seq(new FenceIDecode(tile.dcache.flushOnFenceI)) ++:
+     coreParams.haveCFlush.option(new CFlushDecode(tile.dcache.canSupportCFlushLine)) ++:
+     rocketParams.haveCease.option(new CeaseDecode) ++:
+@@ -324,6 +326,7 @@ class Rocket(tile: RocketTile)(implicit p: Parameters) extends CoreModule()(p)
+   require(decodeWidth == 1 /* TODO */ && retireWidth == decodeWidth)
+   require(!(coreParams.useRVE && coreParams.fpu.nonEmpty), "Can't select both RVE and floating-point")
+   require(!(coreParams.useRVE && coreParams.useHypervisor), "Can't select both RVE and Hypervisor")
++  require(!(usingRoCC && rocketParams.useClamp8), "Can't select both RoCC and clamp8: RoCC claims the custom-0 opcode that clamp8 uses")
+   val id_ctrl = Wire(new IntCtrlSigs).decode(id_inst(0), decode_table)
+ 
+   val lgNXRegs = if (coreParams.useRVE) 4 else 5

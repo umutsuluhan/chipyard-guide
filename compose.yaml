@@ -1,0 +1,18 @@
+services:
+  chipyard:
+    image: ghcr.io/tosiron/ua-chipyard:fall2026-v1
+    platform: linux/amd64
+
+    privileged: true
+    stdin_open: true
+    tty: true
+
+    working_dir: /workspace/chipyard
+
+    volumes:
+      - ./student-work:/workspace/student-work
+      - ./course:/workspace/course:ro
+      - ./scripts:/workspace/course-scripts:ro
+
+    entrypoint:
+      - /workspace/course-scripts/course-entrypoint.sh
